@@ -284,4 +284,10 @@ function LitsScreen:_updateUndoButton()
     self.undo_button:enableDisable(self.board:canUndo())
 end
 
+-- The solver's per-size geometry is only needed while a game is open: drop
+-- it when the screen closes (the next game rebuilds it in a few ms).
+function LitsScreen:onCloseWidget()
+    LitsBoard.release()
+end
+
 return LitsScreen

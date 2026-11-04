@@ -119,6 +119,19 @@ end
 
 local geo_cache = {}
 
+-- Grid sizes whose geometry is built (for tests).
+function Solver.cachedSizes()
+    local list = {}
+    for n in pairs(geo_cache) do list[#list + 1] = n end
+    table.sort(list)
+    return list
+end
+
+-- Drops the cached geometries (~0.6-1.2 MB per size; rebuilt in a few ms).
+function Solver.release()
+    geo_cache = {}
+end
+
 -- Neighbours, 2x2 blocks and every tetromino placement on an n x n grid.
 local function geometry(n)
     if geo_cache[n] then return geo_cache[n] end

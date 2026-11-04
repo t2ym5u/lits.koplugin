@@ -355,4 +355,9 @@ LitsBoard.DEFAULT_N    = DEFAULT_N
 LitsBoard.DIFFICULTIES = DIFFICULTIES
 LitsBoard.Solver       = Solver
 
+-- Frees the solver's per-size caches (see Solver.release).
+function LitsBoard.release()
+    Solver.release()
+end
+
 return LitsBoard
