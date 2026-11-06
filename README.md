@@ -21,8 +21,9 @@ square is entirely shaded.
 - **Three sizes** — 7×7, 8×8, 10×10
 - **Three difficulty levels**, graded by how much reasoning the solver needs
   beyond fitting pieces into regions: easy takes at most one small case
-  analysis, hard takes several, or a case analysis on a wide-open region, or a
-  one-step "what if" trial
+  analysis, hard takes several, or a case analysis on a wide-open region.
+  No level ever needs trial and error ("if this cell were shaded, the rules
+  would break"): a grid that only falls to a guess is thrown away
 - **Live rule check** — a shaded cell that already breaks a rule is crossed out
   (too many cells in a region, a 2×2 block, four cells that are no tetromino,
   two same-shaped pieces touching)
@@ -59,8 +60,8 @@ checked by the logical solver. When moving a cell to another region would cut
 its region in two, the cut-off part goes along with it: that is what breaks
 the usual last tie, a piece that can slide one cell along a corridor.
 
-Generation averages under 0.1 s on a desktop and took at most about 0.45 s over
-100 seeds at every size and level; a device several times slower shows a
+Generation averages under 0.15 s on a desktop and took at most about 0.4 s over
+30 seeds at every size and level; a device several times slower shows a
 progress bar when it takes a moment. Every limit in the generator counts moves
 or search steps, never time, so the same seed builds the same grid on every
 device — which the Daily Challenge relies on.
