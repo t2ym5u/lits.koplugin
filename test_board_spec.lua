@@ -249,6 +249,26 @@ describe("LitsBoard", function()
             assert.is_false(b2.timer:isRunning())
         end)
 
+        -- A game saved by 1.0.x on a puzzle the generator no longer hands
+        -- out (it needed a trial): it still loads and can still be won.
+        it("loads a 1.0.x save, whatever its puzzle", function()
+            local data = {
+                n = 7, difficulty = "medium", level = 2,
+                region = { 7,7,7,1,5,5,5, 4,7,7,1,1,5,6, 4,4,3,1,1,6,6, 4,3,3,1,2,2,6,
+                           4,3,2,2,2,6,6, 4,3,2,2,2,8,6, 4,4,4,2,8,8,8 },
+                solution = { 1,1,1,1,1,1,1, 0,1,0,1,0,1,0, 0,0,1,1,1,0,1, 0,1,1,0,1,0,1,
+                             1,1,0,1,1,1,1, 1,0,0,1,0,1,0, 1,1,0,0,1,1,1 },
+                marks = {}, won = false, hints_used = 0,
+            }
+            for i = 1, 49 do data.marks[i] = 0 end
+            local b = Board:new()
+            assert.is_true(b:load(data))
+            assert.are.equal(2, b.level)
+            assert.is_false(b:isSolved())
+            solve(b, false)
+            assert.is_true(b:isSolved())
+        end)
+
         it("rejects invalid data", function()
             local b = Board:new()
             assert.is_false(b:load(nil))

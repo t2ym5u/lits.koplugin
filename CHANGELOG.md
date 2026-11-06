@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-11-05
+
+### Changed
+- No puzzle ever needs trial and error any more, on any level: the solver
+  that grades the grids no longer tries "if this cell were shaded, the rules
+  would break", and a grid that only falls to such a guess is thrown away.
+  About 1 grid in 30 at Hard (and 1 in 30 at 7×7 Medium) needed one before.
+- The Daily Challenge grid changes once for the days whose grid needed a
+  trial.
+- Slightly faster generation (about a fifth less work): a layout the
+  generator has already measured is not measured again, and connectivity is
+  only rechecked once a cell was emptied. The worst case is still about
+  0.4 s on a desktop. Same puzzles for the same seed.
+
 ## [1.0.5] - 2026-11-04
 
 ### Fixed

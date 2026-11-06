@@ -24,10 +24,11 @@ Solver.UNKNOWN, Solver.SHADED, Solver.EMPTY = UNKNOWN, SHADED, EMPTY
 --           rules, and cells that can no longer join the shaded group;
 --   tier 2: case analysis on a region down to two placements: place each,
 --           propagate, keep what both outcomes agree on;
---   tier 3: the same on a region with more placements left, or a
---           single-cell trial ("if this cell were shaded, the rules above
---           would break"), one step deep.
--- Anything that needs more than that is never handed out as a puzzle. The
+--   tier 3: the same on a region with more placements left (every way
+--           the region's piece can lie, worked through one by one).
+-- There is no trial and error: a puzzle that would need "if this cell were
+-- shaded, the rules would break" -- a guess followed by a contradiction --
+-- is never handed out. Anything beyond tier 3 is rejected the same way. The
 -- difficulty level is set by how much tier 2-3 work a puzzle takes (see
 -- Solver.score below): easy is tier 1 plus one small case analysis at most.
 Solver.LEVEL = { easy = 1, medium = 2, hard = 3 }
@@ -290,15 +291,16 @@ local function fits(P, st, c, shaded_in_region, kshape)
 end
 
 -- Cells that can no longer be joined to the shaded group are empty; a
--- shaded cell cut off from the others is a contradiction. Returns ok, and
--- the list of cells it emptied (nil if none).
+-- shaded cell cut off from the others is a contradiction. Returns ok, the
+-- list of cells it emptied (nil if none), and whether there was a shaded
+-- cell to start from (if not, it checked nothing).
 local function connectivity(P, st)
     local N = P.N
     local start
     for i = 1, N do
         if st[i] == SHADED then start = i; break end
     end
-    if not start then return true, nil end
+    if not start then return true, nil, false end
     local nb = P.nb
     -- mark[i] == stamp: reached. One array per puzzle, never cleared.
     P.stamp = P.stamp + 1
@@ -331,7 +333,7 @@ local function connectivity(P, st)
             end
         end
     end
-    return true, cut
+    return true, cut, true
 end
 
 -- `alive0`: candidate lists to start from (those of an earlier, weaker
@@ -346,18 +348,28 @@ local function propagate(P, st, no_conn, alive0, seeds)
     local R = P.nregions
     local box, nb, hits = P.box, P.nb, P.hits
     local alive, kshape, shaded, dirty = {}, {}, {}, {}
+    -- A region whose remaining placements all share one shape holds its
+    -- neighbours to the shape rule. kshape0: that shape per region (false:
+    -- none) for the starting lists, kept with them (see the end).
+    local from = alive0 or P.cands
+    local kshape0 = from.kshape
+    if not kshape0 then
+        kshape0 = {}
+        for id = 1, R do
+            local a = from[id]
+            local sh = a[1] and a[1].shape
+            for k = 2, #a do
+                if a[k].shape ~= sh then sh = nil; break end
+            end
+            kshape0[id] = sh or false
+        end
+        from.kshape = kshape0
+    end
     for id = 1, R do
-        local a = alive0 and alive0[id] or P.cands[id]
-        alive[id] = a
+        alive[id] = from[id]
         shaded[id] = 0
         dirty[id] = not seeds
-        -- A region whose remaining placements all share one shape holds
-        -- its neighbours to the shape rule.
-        local sh = a[1] and a[1].shape
-        for k = 2, #a do
-            if a[k].shape ~= sh then sh = nil; break end
-        end
-        kshape[id] = sh
+        kshape[id] = kshape0[id] or nil
     end
     for i = 1, N do
         if st[i] == SHADED then shaded[region[i]] = shaded[region[i]] + 1 end
@@ -379,6 +391,10 @@ local function propagate(P, st, no_conn, alive0, seeds)
         blocks_todo = P.blocks
     end
     local first = true
+    -- Connectivity needs re-checking only once a cell was emptied since its
+    -- last run (shading alone keeps every open cell joined to the group it
+    -- found), or if that run had no shaded cell to start from.
+    local emptied, conn_started = false, false
     while true do
         local changed = false
         local fresh = {}
@@ -424,7 +440,7 @@ local function propagate(P, st, no_conn, alive0, seeds)
                             shaded[id] = shaded[id] + 1
                             fresh[#fresh + 1] = x
                         elseif h == 0 then
-                            st[x] = EMPTY; changed = true
+                            st[x] = EMPTY; changed = true; emptied = true
                         end
                         if h == na or h == 0 then
                             local bx = box[x]
@@ -454,16 +470,17 @@ local function propagate(P, st, no_conn, alive0, seeds)
             end
             if sc == 4 then return false end
             if sc == 3 and unk then
-                st[unk] = EMPTY; changed = true
+                st[unk] = EMPTY; changed = true; emptied = true
                 local bx = box[unk]
                 for m = 1, #bx do dirty[region[bx[m]]] = true end
             end
         end
         -- Connectivity can only change when a cell was emptied (or shaded:
         -- a shaded cell must be reachable too).
-        if not no_conn and (first or changed) then
-            local ok, cut = connectivity(P, st)
+        if not no_conn and (first or (changed and (emptied or not conn_started))) then
+            local ok, cut, started = connectivity(P, st)
             if not ok then return false end
+            emptied, conn_started = false, started
             if cut then
                 changed = true
                 for _, x in ipairs(cut) do
@@ -473,7 +490,15 @@ local function propagate(P, st, no_conn, alive0, seeds)
             end
         end
         first = false
-        if not changed then return true, alive end
+        if not changed then
+            -- The shapes left per region, for a later call starting from
+            -- these lists: a list only shrinks, so kshape[id] is set exactly
+            -- when all of alive[id] share one shape.
+            local ks = {}
+            for id = 1, R do ks[id] = kshape[id] or false end
+            alive.kshape = ks
+            return true, alive
+        end
     end
 end
 Solver.propagate = propagate
@@ -502,11 +527,13 @@ end
 -- Returns "contra", true (progress) or false.
 -- ---------------------------------------------------------------------------
 
-local function regionStep(P, st, alive, max_ways)
+-- Regions with min_ways placements or fewer are skipped (nil: none).
+local function regionStep(P, st, alive, max_ways, min_ways)
+    min_ways = min_ways or 1
     local N = P.N
     for id = 1, P.nregions do
         local a = alive[id]
-        if #a > 1 and #a <= max_ways then
+        if #a > min_ways and #a <= max_ways then
             -- st is a propagation fixpoint here (every caller propagates
             -- first), so each case propagates from the cells it wrote.
             local list = P.cells[id]
@@ -572,28 +599,8 @@ local function closure(P, st, max_ways, alive, seeds)
     end
 end
 
--- ---------------------------------------------------------------------------
--- Tier 3: single-cell trial with propagation and the small case analyses.
--- st is a fixpoint of every cheaper technique here, so a trial propagates
--- from the one cell it wrote.
--- ---------------------------------------------------------------------------
-
-local function trialStep(P, st, alive)
-    for i = 1, P.N do
-        if st[i] == UNKNOWN then
-            local t = copy(st)
-            t[i] = SHADED
-            if not closure(P, t, SMALL_CASES, alive, { i }) then st[i] = EMPTY; return true, { i } end
-            t = copy(st)
-            t[i] = EMPTY
-            if not closure(P, t, SMALL_CASES, alive, { i }) then st[i] = SHADED; return true, { i } end
-        end
-    end
-    return false
-end
-
 -- Which tier each technique belongs to (see the ladder above).
-local TIER = { conn = 1, small = 2, full = 3, trial = 3 }
+local TIER = { conn = 1, small = 2, full = 3 }
 
 -- Solve by logic alone, cheapest technique first, going back to the start of
 -- the ladder after every deduction; `max_level` caps the tier. Returns status
@@ -604,10 +611,6 @@ function Solver.logicSolve(P, max_level, st)
     st = st and copy(st) or {}
     if #st == 0 then for i = 1, P.N do st[i] = UNKNOWN end end
     local used, steps = 1, { 0, 0, 0 }
-    local function note(tier)
-        steps[tier] = steps[tier] + 1
-        if tier > used then used = tier end
-    end
     -- After the first pass, propagation restarts from the cells the last
     -- deduction wrote, with the candidates it had left.
     local alive, seeds
@@ -620,21 +623,28 @@ function Solver.logicSolve(P, max_level, st)
         if TIER.conn <= max_level then
             local ok2, cut = connectivity(P, st)
             if not ok2 then return "contra", used, st, steps end
-            if cut then progress = true; seeds = cut; note(TIER.conn) end
+            if cut then progress = true; seeds = cut; steps[TIER.conn] = steps[TIER.conn] + 1 end
         end
         if not progress and TIER.small <= max_level then
             local r, changed = regionStep(P, st, alive, SMALL_CASES)
             if r == "contra" then return "contra", used, st, steps end
-            if r then progress = true; seeds = changed; note(TIER.small) end
+            if r then
+                progress = true; seeds = changed
+                steps[TIER.small] = steps[TIER.small] + 1
+                if TIER.small > used then used = TIER.small end
+            end
         end
         if not progress and TIER.full <= max_level then
-            local r, changed = regionStep(P, st, alive, math.huge)
+            -- The small regions were just tried on this same state (when
+            -- tier 2 ran): skip them.
+            local r, changed = regionStep(P, st, alive, math.huge,
+                TIER.small <= max_level and SMALL_CASES or 1)
             if r == "contra" then return "contra", used, st, steps end
-            if r then progress = true; seeds = changed; note(TIER.full) end
-        end
-        if not progress and TIER.trial <= max_level then
-            local r, changed = trialStep(P, st, alive)
-            if r then progress = true; seeds = changed; note(TIER.trial) end
+            if r then
+                progress = true; seeds = changed
+                steps[TIER.full] = steps[TIER.full] + 1
+                if TIER.full > used then used = TIER.full end
+            end
         end
         if not progress then return "stuck", used, st, steps end
     end
@@ -701,44 +711,58 @@ function Solver.countSolutions(P, limit, budget, start, start_alive)
     budget = budget or 20000
     local count, nodes, exhausted = 0, 0, false
     local sols = {}
+    local R, cells = P.nregions, P.cells
 
+    -- Depth first with an explicit stack, children in candidate order (no
+    -- recursion, no closure made per call: LuaJIT ties compiled code to a
+    -- closure's identity, so a fresh one per count kept it compiling). An
+    -- entry is a state to explore: the parent's state, its alive lists, the
+    -- seeds and the region/candidate to place (the copy is made when the
+    -- entry is reached), or for the root the start state itself.
     -- A child differs from its propagated parent only by the piece placed,
     -- so it propagates from that region's cells.
-    local function dfs(st, parent_alive, seeds)
-        if count >= limit or exhausted then return end
+    local st0 = start and copy(start) or {}
+    if not start then for i = 1, P.N do st0[i] = UNKNOWN end end
+    local s_st, s_alive, s_seeds, s_id, s_c = { st0 }, { start_alive or false }, { false }, { false }, { false }
+    local top = 1
+    while top > 0 do
+        local st, parent_alive, seeds, id, c = s_st[top], s_alive[top], s_seeds[top], s_id[top], s_c[top]
+        top = top - 1
+        if count >= limit or exhausted then break end
         nodes = nodes + 1
-        if nodes > budget then exhausted = true; return end
-        local ok, alive = propagate(P, st, false, parent_alive, seeds)
-        if not ok then return end
-        local best, best_n = nil, math.huge
-        for id = 1, P.nregions do
-            local k = #alive[id]
-            if k > 1 and k < best_n then best, best_n = id, k end
+        if nodes > budget then exhausted = true; break end
+        if id then
+            st = copy(st)
+            place(P, st, id, c)
         end
-        if not best then
-            -- Every region is down to one piece, so propagation has shaded
-            -- it and emptied the rest -- and checked the 2x2, shape and
-            -- connectivity rules on the finished grid on the way.
-            count = count + 1
-            sols[#sols + 1] = st
-            return
-        end
-        local seeds = {}
-        local list = P.cells[best]
-        for k = 1, #list do
-            if st[list[k]] == UNKNOWN then seeds[#seeds + 1] = list[k] end
-        end
-        for _, c in ipairs(alive[best]) do
-            local t = copy(st)
-            place(P, t, best, c)
-            dfs(t, alive, seeds)
-            if count >= limit or exhausted then return end
+        local ok, alive = propagate(P, st, false, parent_alive or nil, seeds or nil)
+        if ok then
+            local best, best_n = nil, math.huge
+            for r = 1, R do
+                local k = #alive[r]
+                if k > 1 and k < best_n then best, best_n = r, k end
+            end
+            if not best then
+                -- Every region is down to one piece, so propagation has
+                -- shaded it and emptied the rest -- and checked the 2x2,
+                -- shape and connectivity rules on the finished grid on the
+                -- way.
+                count = count + 1
+                sols[#sols + 1] = st
+            else
+                local cs = {}
+                local list = cells[best]
+                for k = 1, #list do
+                    if st[list[k]] == UNKNOWN then cs[#cs + 1] = list[k] end
+                end
+                local a = alive[best]
+                for k = #a, 1, -1 do
+                    top = top + 1
+                    s_st[top], s_alive[top], s_seeds[top], s_id[top], s_c[top] = st, alive, cs, best, a[k]
+                end
+            end
         end
     end
-
-    local st = start and copy(start) or {}
-    if not start then for i = 1, P.N do st[i] = UNKNOWN end end
-    dfs(st, start_alive)
     return count, exhausted, sols
 end
 
@@ -760,6 +784,57 @@ end
 local PLANT_SAMPLE = 200
 local PLANT_TRIES = 2
 
+-- p fits the planting so far (sol / piece_of / shapes, `count` pieces):
+-- free cells, touching the group, no 2x2 block, no same-shaped neighbour.
+-- p.around / p.blocks are precomputed per placement (see geometry).
+-- Module-level helpers rather than closures made per call: LuaJIT ties its
+-- compiled code to a closure's identity, so fresh closures kept it
+-- compiling.
+local function plantOk(p, sol, piece_of, shapes, count)
+    local pc = p.cells
+    for k = 1, 4 do
+        if sol[pc[k]] ~= 0 then return false end
+    end
+    local touches = (count == 0)
+    local around = p.around
+    for k = 1, #around do
+        local j = around[k]
+        if sol[j] ~= 0 then
+            touches = true
+            if shapes[piece_of[j]] == p.shape then return false end
+        end
+    end
+    if not touches then return false end
+    local own, blocks = p.own, p.blocks
+    for k = 1, #blocks do
+        local b = blocks[k]
+        local full = true
+        for m = 1, 4 do
+            if not own[b[m]] and sol[b[m]] == 0 then full = false; break end
+        end
+        if full then return false end
+    end
+    return true
+end
+
+-- Snug placements first: a piece hugging the group leaves fewer thin gaps
+-- that nothing fits in later, so the shading packs denser (about 60%,
+-- Nikoli's own LITS density) -- and dense shading means small regions,
+-- which is where uniqueness comes from. Hugging the grid edge as well
+-- packs denser still, but shades nearly the whole border: a giveaway.
+local function snug(p, sol, nb)
+    local own, score = p.own, 0
+    local pc = p.cells
+    for k = 1, 4 do
+        local ni = nb[pc[k]]
+        for m = 1, #ni do
+            local j = ni[m]
+            if not own[j] and sol[j] ~= 0 then score = score + 1 end
+        end
+    end
+    return score
+end
+
 local function plantPieces(n, max_cells)
     local g = geometry(n)
     local N = n * n
@@ -768,60 +843,15 @@ local function plantPieces(n, max_cells)
     local order = {}
     for k = 1, #g.placements do order[k] = k end
     local count = 0
-
-    -- p.around / p.blocks are precomputed per placement (see geometry).
-    local function ok(p)
-        local pc = p.cells
-        for k = 1, 4 do
-            if sol[pc[k]] ~= 0 then return false end
-        end
-        local touches = (count == 0)
-        local around = p.around
-        for k = 1, #around do
-            local j = around[k]
-            if sol[j] ~= 0 then
-                touches = true
-                if shapes[piece_of[j]] == p.shape then return false end
-            end
-        end
-        if not touches then return false end
-        local own, blocks = p.own, p.blocks
-        for k = 1, #blocks do
-            local b = blocks[k]
-            local full = true
-            for m = 1, 4 do
-                if not own[b[m]] and sol[b[m]] == 0 then full = false; break end
-            end
-            if full then return false end
-        end
-        return true
-    end
-
-    -- Snug placements first: a piece hugging the group leaves fewer thin gaps
-    -- that nothing fits in later, so the shading packs denser (about 60%,
-    -- Nikoli's own LITS density) -- and dense shading means small regions,
-    -- which is where uniqueness comes from. Hugging the grid edge as well
-    -- packs denser still, but shades nearly the whole border: a giveaway.
-    local function snug(p)
-        local own, score = p.own, 0
-        local pc = p.cells
-        for k = 1, 4 do
-            local ni = g.nb[pc[k]]
-            for m = 1, #ni do
-                local j = ni[m]
-                if not own[j] and sol[j] ~= 0 then score = score + 1 end
-            end
-        end
-        return score
-    end
+    local placements, nb = g.placements, g.nb
     while count * 4 + 4 <= max_cells do
         shuffle(order)
         local best, best_score
         local seen = 0
         for _, k in ipairs(order) do
-            local p = g.placements[k]
-            if ok(p) then
-                local sc = snug(p)
+            local p = placements[k]
+            if plantOk(p, sol, piece_of, shapes, count) then
+                local sc = snug(p, sol, nb)
                 if not best or sc > best_score then best, best_score = p, sc end
                 -- The snuggest of a random sample is snug enough.
                 seen = seen + 1
@@ -841,6 +871,22 @@ end
 -- the fewest new tetromino placements (random tie-break): a region that only
 -- fits its own piece is what makes a LITS unique, and a careless cell is
 -- enough to let a second placement in.
+-- Placements through x lying inside region id once x joins it.
+local function opened(placements_of, region, x, id)
+    local k = 0
+    local list = placements_of[x]
+    for m = 1, #list do
+        local pc = list[m].cells
+        local inside = true
+        for q = 1, 4 do
+            local y = pc[q]
+            if y ~= x and region[y] ~= id then inside = false; break end
+        end
+        if inside then k = k + 1 end
+    end
+    return k
+end
+
 local function buildRegions(n, sol, piece_of, count)
     local g = geometry(n)
     local nb, placements_of = g.nb, g.placements_of
@@ -848,18 +894,6 @@ local function buildRegions(n, sol, piece_of, count)
     local region = {}
     for i = 1, N do
         if sol[i] == 1 then region[i] = piece_of[i] end
-    end
-    -- Placements through x lying inside region id once x joins it.
-    local function opened(x, id)
-        local k = 0
-        for _, p in ipairs(placements_of[x]) do
-            local inside = true
-            for _, y in ipairs(p.cells) do
-                if y ~= x and region[y] ~= id then inside = false; break end
-            end
-            if inside then k = k + 1 end
-        end
-        return k
     end
     while true do
         local best_x, best_id, best_k, ties = nil, nil, math.huge, 0
@@ -870,7 +904,7 @@ local function buildRegions(n, sol, piece_of, count)
                     local id = region[j]
                     if id and not seen[id] then
                         seen[id] = true
-                        local k = opened(x, id)
+                        local k = opened(placements_of, region, x, id)
                         if k < best_k then
                             best_x, best_id, best_k, ties = x, id, k, 1
                         elseif k == best_k then
@@ -949,12 +983,15 @@ local function moveOneOf(n, sol, region, cells)
         if group then
             local t, old = targets[math.random(#targets)], region[x]
             for _, gc in ipairs(group) do region[gc] = t end
-            return function()
-                for _, gc in ipairs(group) do region[gc] = old end
-            end
+            return group, old
         end
     end
     return nil
+end
+
+-- Undoes a move: the cells moved and the region they came from.
+local function undoMove(region, group, old)
+    for _, gc in ipairs(group) do region[gc] = old end
 end
 
 local function emptyCells(sol, extra)
@@ -1047,9 +1084,7 @@ local function freeMove(n, region, cells)
                 end
                 local t = targets[math.random(#targets)]
                 for _, c in ipairs(group) do region[c] = t end
-                return function()
-                    for _, c in ipairs(group) do region[c] = id end
-                end
+                return group, id
             end
         end
     end
@@ -1058,8 +1093,16 @@ end
 
 -- Returns the measure (lower is better) and the solutions found, or nil
 -- when the layout has no solution at all.
-local function freeMeasure(n, region, budget)
-    tick()
+-- The climbs often propose a layout they already measured (a move undone,
+-- then made again elsewhere and back): both measures below are pure
+-- functions of the layout (no math.random), so generateBest keeps what they
+-- returned per layout for the whole generation (`memo`, keyed by the
+-- layout; false stands for nil).
+local function layoutKey(region)
+    return table.concat(region, ",")
+end
+
+local function freeMeasure0(n, region, budget)
     local P = Solver.newPuzzle(n, region)
     local st = {}
     for i = 1, P.N do st[i] = UNKNOWN end
@@ -1073,9 +1116,22 @@ local function freeMeasure(n, region, budget)
     return count * 10000 + total, sols
 end
 
-local function makeUnique(n, region, max_moves, budget)
+local function freeMeasure(n, region, budget, memo)
+    tick()
+    local key = layoutKey(region)
+    local known = memo[key]
+    if known ~= nil then
+        if not known then return nil end
+        return known[1], known[2]
+    end
+    local c, sols = freeMeasure0(n, region, budget)
+    memo[key] = c and { c, sols } or false
+    return c, sols
+end
+
+local function makeUnique(n, region, max_moves, budget, memo)
     local N = n * n
-    local cur, sols = freeMeasure(n, region, budget)
+    local cur, sols = freeMeasure(n, region, budget, memo)
     if not cur then return nil end
     for _ = 1, max_moves do
         if cur < 20000 and #sols == 1 then
@@ -1090,18 +1146,18 @@ local function makeUnique(n, region, max_moves, budget)
         else
             for i = 1, N do diff[#diff + 1] = i end
         end
-        local undo = freeMove(n, region, shuffle(diff))
-        if not undo then
+        local group, old = freeMove(n, region, shuffle(diff))
+        if not group then
             local all = {}
             for i = 1, N do all[i] = i end
-            undo = freeMove(n, region, shuffle(all))
+            group, old = freeMove(n, region, shuffle(all))
         end
-        if not undo then return nil end
-        local nc, nsols = freeMeasure(n, region, budget)
+        if not group then return nil end
+        local nc, nsols = freeMeasure(n, region, budget, memo)
         if nc and (nc <= cur or math.random() < ACCEPT_WORSE) then
             cur, sols = nc, nsols
         else
-            undo()
+            undoMove(region, group, old)
         end
     end
     return nil
@@ -1110,7 +1166,7 @@ end
 -- The grade counts the work rather than only naming the hardest technique
 -- (a LITS of any size usually needs a case analysis or two somewhere): each
 -- case analysis on a region down to two placements scores 1, each bigger
--- analysis or trial 3. Easy allows one small analysis at most, hard takes a
+-- analysis 3. Easy allows one small analysis at most, hard takes a
 -- score of HARD_SCORE or more; measured over unique 7x7-10x10 layouts this
 -- splits them roughly into thirds.
 local EASY_MAX   = 1
@@ -1136,15 +1192,15 @@ local function countOpen(st)
 end
 
 -- How far the puzzle is from the wanted level, 0 = on target, nil = not
--- acceptable (no longer unique, or beyond the tier-3 solver).
-local function distance(n, region, want, budget)
-    tick()
+-- acceptable (no longer unique, or beyond the tier-3 solver: a puzzle that
+-- would take trial and error is never handed out).
+local function distance0(n, region, want, budget)
     local P = Solver.newPuzzle(n, region)
-    -- Tiers 1-2 first: trials are by far the dearest step.
+    -- Tiers 1-2 first: the big case analyses are by far the dearest step.
     local status, _, st, steps = Solver.logicSolve(P, 2)
     if status == "contra" then return nil end
     if status ~= "solved" then
-        -- Stuck before trials: still unique at all?
+        -- Stuck before the big case analyses: still unique at all?
         local count, exhausted = Solver.countSolutions(P, 2, budget, st)
         if count ~= 1 or exhausted then return nil end
         -- Far from easy; the cells left open give the climb a slope.
@@ -1163,14 +1219,24 @@ local function distance(n, region, want, budget)
     return math.max(0, HARD_SCORE - score)
 end
 
-local function climb(n, sol, region, want, moves, budget)
-    local d = distance(n, region, want, budget)
+local function distance(n, region, want, budget, memo)
+    tick()
+    local key = layoutKey(region)
+    local known = memo[key]
+    if known ~= nil then return known or nil end
+    local d = distance0(n, region, want, budget)
+    memo[key] = d or false
+    return d
+end
+
+local function climb(n, sol, region, want, moves, budget, memo)
+    local d = distance(n, region, want, budget, memo)
     for _ = 1, moves do
         if d == 0 then break end
-        local undo = moveOneOf(n, sol, region, emptyCells(sol))
-        if not undo then break end
-        local nd = distance(n, region, want, budget)
-        if nd and (not d or nd <= d) then d = nd else undo() end
+        local group, old = moveOneOf(n, sol, region, emptyCells(sol))
+        if not group then break end
+        local nd = distance(n, region, want, budget, memo)
+        if nd and (not d or nd <= d) then d = nd else undoMove(region, group, old) end
     end
     return d
 end
@@ -1179,6 +1245,8 @@ local function generateBest(n, difficulty, opts)
     local want = Solver.LEVEL[difficulty] or 1
     local max_attempts = opts.max_attempts or math.floor(4000 / (n * n))
     local best, best_d
+    -- One memo per measure (see layoutKey): the two return different things.
+    local memo_free, memo_dist = {}, {}
     for _ = 1, max_attempts do
         -- The denser of two plantings: denser shading means smaller
         -- regions, and the surgery reaches uniqueness more often.
@@ -1188,9 +1256,9 @@ local function generateBest(n, difficulty, opts)
             if c2 > count then sol, piece_of, count = s2, p2, c2 end
         end
         local region = count >= 2 and buildRegions(n, sol, piece_of, count)
-        local unique = region and makeUnique(n, region, 8 * n, BUDGET)
+        local unique = region and makeUnique(n, region, 8 * n, BUDGET, memo_free)
         if unique then
-            local d = climb(n, unique, region, want, 10 * n, BUDGET)
+            local d = climb(n, unique, region, want, 10 * n, BUDGET, memo_dist)
             if d and (not best or d < best_d) then
                 best, best_d = { n = n, region = region, solution = unique }, d
             end

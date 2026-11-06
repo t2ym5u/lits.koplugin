@@ -138,7 +138,7 @@ describe("LITS solver", function()
             local count, exhausted = Solver.countSolutions(P, 2, 1e6)
             assert.is_false(exhausted)
             assert.are.equal(1, count)
-            -- ...and logic alone (up to single-cell trials) finds it.
+            -- ...and logic alone (no trial and error) finds it.
             local status, _, st, steps = Solver.logicSolve(P, 3)
             assert.are.equal("solved", status)
             assert.are.equal(p.level, Solver.levelOf(status, steps))
@@ -201,6 +201,77 @@ describe("LITS solver", function()
             local p = Solver.generate(8, "hard")
             local _, _, _, steps = Solver.logicSolve(Solver.newPuzzle(8, p.region), 3)
             assert.is_true(Solver.score(steps) >= 5)
+        end)
+
+        -- A unique 7x7 that the 1.0.x generator handed out as Medium: it
+        -- only falls to "if this cell were shaded, the rules would break",
+        -- which the owner counts as guessing. The solver must stop on it.
+        it("never uses trial and error", function()
+            local R = {
+                { 7, 7, 7, 1, 5, 5, 5 },
+                { 4, 7, 7, 1, 1, 5, 6 },
+                { 4, 4, 3, 1, 1, 6, 6 },
+                { 4, 3, 3, 1, 2, 2, 6 },
+                { 4, 3, 2, 2, 2, 6, 6 },
+                { 4, 3, 2, 2, 2, 8, 6 },
+                { 4, 4, 4, 2, 8, 8, 8 },
+            }
+            local flat = {}
+            for r = 1, 7 do for c = 1, 7 do flat[#flat + 1] = R[r][c] end end
+            local P = Solver.newPuzzle(7, flat)
+            local count = Solver.countSolutions(P, 2, 1e6)
+            assert.are.equal(1, count)
+            local status = Solver.logicSolve(P, 3)
+            assert.are.equal("stuck", status)
+        end)
+
+        -- The seeds whose puzzle needed a trial before 1.1.0 (seeded the way
+        -- the measurements were), and a sweep: every puzzle falls to logic.
+        it("hands out no puzzle that needs trial and error", function()
+            local cases = { { 7, "medium", 27 }, { 7, "hard", 20 }, { 8, "hard", 11 }, { 10, "hard", 6 } }
+            for seed = 1, 4 do
+                for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                    cases[#cases + 1] = { 7, diff, 100 + seed }
+                end
+            end
+            for _, c in ipairs(cases) do
+                local n, diff, seed = c[1], c[2], c[3]
+                math.randomseed(seed * 7919 + n)
+                local p = Solver.generate(n, diff)
+                local P = Solver.newPuzzle(n, p.region)
+                local status, used, _, steps = Solver.logicSolve(P, 3)
+                assert.are.equal("solved", status, ("%dx%d %s seed %d"):format(n, n, diff, seed))
+                assert.is_true(used <= 3)
+                assert.is_nil(steps[4])
+                assert.are.equal(Solver.LEVEL[diff], p.level)
+                local count, exhausted = Solver.countSolutions(P, 2, 1e6)
+                assert.is_false(exhausted)
+                assert.are.equal(1, count)
+            end
+        end)
+
+        it("levels really differ in the work they take", function()
+            local sum = { 0, 0, 0 }
+            for seed = 1, 4 do
+                for lvl, diff in ipairs({ "easy", "medium", "hard" }) do
+                    math.randomseed(seed * 7919 + 8)
+                    local p = Solver.generate(8, diff)
+                    local _, _, _, steps = Solver.logicSolve(Solver.newPuzzle(8, p.region), 3)
+                    sum[lvl] = sum[lvl] + Solver.score(steps)
+                end
+            end
+            assert.is_true(sum[1] < sum[2] and sum[2] < sum[3])
+        end)
+
+        -- Generous: the worst seen on a Mac is ~0.4 s at 10x10 (the screen
+        -- shows a progress bar while it works).
+        it("generates a 10x10 hard puzzle in reasonable time", function()
+            for seed = 1, 3 do
+                math.randomseed(seed * 7919 + 10)
+                local t = os.clock()
+                assert.is_truthy(Solver.generate(10, "hard"))
+                assert.is_true(os.clock() - t < 3)
+            end
         end)
 
         -- The Daily Challenge builds today's grid from a fixed seed on every
